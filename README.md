@@ -6,7 +6,7 @@ A fully autonomous trading intelligence system that treats markets as **adaptive
 
 ---
 
-## 🏗️ Architecture
+##  Architecture
 
 ```
                           ┌──────────────────────┐
@@ -37,7 +37,7 @@ A fully autonomous trading intelligence system that treats markets as **adaptive
 
 ---
 
-## 🚀 Quick Start
+##  Quick Start
 
 ### Prerequisites
 
@@ -103,7 +103,7 @@ python -m pytest tests/ -v
 
 ---
 
-## 📊 The 6 Intelligence Dimensions
+##  The 6 Intelligence Dimensions
 
 Every stock is scored **0–100** on 6 dimensions, combined into a weighted composite:
 
@@ -126,7 +126,7 @@ Every stock is scored **0–100** on 6 dimensions, combined into a weighted comp
 
 ---
 
-## 🔌 API Endpoints (23 total)
+##  API Endpoints (23 total)
 
 ### Core Data
 ```bash
@@ -179,7 +179,7 @@ GET  /api/v1/trade/auto/status                        # Live status + trade log
 
 ---
 
-## 🤖 Auto-Trader Bot
+##  Auto-Trader Bot
 
 The platform includes an autonomous trading bot that:
 
@@ -202,7 +202,7 @@ curl -X POST http://localhost:8000/api/v1/trade/auto/stop
 
 ---
 
-## 🌪️ Scenario Simulation
+##  Scenario Simulation
 
 Monte Carlo engine using **Geometric Brownian Motion**:
 
@@ -234,7 +234,7 @@ curl "http://localhost:8000/api/v1/simulate/AAPL?horizon=1m" | python -m json.to
 
 ---
 
-## 📁 Project Structure
+##  Project Structure
 
 ```
 Trading/
@@ -279,6 +279,6 @@ Trading/
 
 ---
 
-## ⚠️ Disclaimer
+##  Disclaimer
 
 This platform is for **educational and paper trading purposes only**. It is not financial advice. Past performance and simulations do not guarantee future results. Always do your own research before making trading decisions.
