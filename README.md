@@ -1,4 +1,4 @@
-# 🧠 Universal AI-Powered Trading Intelligence Platform
+#  Universal AI-Powered Trading Intelligence Platform
 
 A fully autonomous trading intelligence system that treats markets as **adaptive, living organisms** — not static price charts. It ingests real-time data from 5 sources, analyzes through 6 AI-driven engines, and executes trades autonomously via Alpaca paper trading.
 
