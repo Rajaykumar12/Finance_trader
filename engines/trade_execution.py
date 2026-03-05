@@ -148,22 +148,24 @@ async def get_orders(status: str = "all", limit: int = 20) -> dict:
 async def place_order(
     symbol: str,
     side: str,           # "buy" or "sell"
-    qty: int = 1,
+    qty: Optional[float] = None,
     order_type: str = "market",  # "market", "limit", "stop", "stop_limit"
     limit_price: Optional[float] = None,
     stop_price: Optional[float] = None,
     time_in_force: str = "day",  # "day", "gtc", "ioc", "fok"
+    notional: Optional[float] = None,
 ) -> dict:
     """Place a paper trade order on Alpaca.
 
     Args:
         symbol: Stock ticker (AAPL, TSLA, etc.)
         side: "buy" or "sell"
-        qty: Number of shares
+        qty: Number of shares (mutually exclusive with notional)
         order_type: "market", "limit", "stop", "stop_limit"
         limit_price: Required for limit/stop_limit orders
         stop_price: Required for stop/stop_limit orders
         time_in_force: "day" (expires end of day), "gtc" (good til cancelled)
+        notional: Dollar amount to invest (mutually exclusive with qty)
 
     Returns:
         Order confirmation with ID and status
@@ -185,17 +187,30 @@ async def place_order(
     if order_type in ("stop", "stop_limit") and stop_price is None:
         return {"error": "stop_price required for stop/stop_limit orders"}
 
-    if qty <= 0:
+    if qty is None and notional is None:
+        qty = 1 # default to 1 share if neither provided
+
+    if qty is not None and notional is not None:
+        return {"error": "Cannot provide both qty and notional"}
+
+    if qty is not None and float(qty) <= 0:
         return {"error": "Quantity must be positive"}
+
+    if notional is not None and float(notional) <= 0:
+        return {"error": "Notional must be positive"}
 
     # Build order payload
     order_data = {
         "symbol": symbol.upper(),
-        "qty": str(qty),
         "side": side,
         "type": order_type,
         "time_in_force": time_in_force,
     }
+    if qty is not None:
+        order_data["qty"] = str(qty)
+    elif notional is not None:
+        order_data["notional"] = str(notional)
+
     if limit_price is not None:
         order_data["limit_price"] = str(limit_price)
     if stop_price is not None:
@@ -233,7 +248,8 @@ async def place_order(
                     "order_id": o["id"],
                     "symbol": o["symbol"],
                     "side": o["side"],
-                    "qty": o["qty"],
+                    "qty": o.get("qty"),
+                    "notional": o.get("notional"),
                     "type": o["type"],
                     "status": o["status"],
                     "limit_price": o.get("limit_price"),
@@ -242,7 +258,7 @@ async def place_order(
                     "time_in_force": o.get("time_in_force"),
                 },
                 "current_price": current_price,
-                "estimated_cost": round(current_price * qty, 2) if current_price else None,
+                "estimated_cost": round(current_price * (qty or 1), 2) if current_price and qty is not None else float(o.get("notional", 0)),
                 "timestamp": datetime.now(timezone.utc).isoformat(),
             }
         else:
@@ -308,6 +324,103 @@ async def close_all_positions() -> dict:
             return {"success": True, "message": "All positions closed (liquidated)"}
         else:
             return {"success": False, "error": r.text}
+
+
+# ── Bracket Order (Entry + TP + SL in one submission) ───────────────
+
+async def place_bracket_order(
+    symbol: str,
+    notional: float,
+    take_profit_pct: float = 0.015,
+    stop_loss_pct: float = 0.008,
+) -> dict:
+    """Place a bracket buy order: market entry + take-profit limit + stop-loss stop.
+
+    Alpaca executes this as a single OTO (One-Triggers-Other) bracket:
+      - Parent: market buy of `notional` dollars
+      - When filled, two OCO legs activate automatically:
+        - Limit sell at entry_price × (1 + take_profit_pct)  → take profit
+        - Stop  sell at entry_price × (1 - stop_loss_pct)   → stop loss
+
+    The exits are wired in at submission time — no polling required.
+
+    Args:
+        symbol:           Ticker (AAPL, TSLA, …)
+        notional:         Dollar amount to invest
+        take_profit_pct:  e.g. 0.015 = 1.5% above entry
+        stop_loss_pct:    e.g. 0.008 = 0.8% below entry
+    """
+    _check_keys()
+
+    if notional <= 0:
+        return {"error": "Notional must be positive", "success": False}
+
+    # Fetch current ask price to calculate bracket legs
+    async with httpx.AsyncClient(timeout=10) as client:
+        try:
+            quote_r = await client.get(
+                f"{DATA_API}/v2/stocks/{symbol.upper()}/quotes/latest",
+                headers=_headers(),
+            )
+            quote = quote_r.json().get("quote", {})
+            ask_price = float(quote.get("ap", 0))
+        except Exception:
+            ask_price = 0.0
+
+        if ask_price <= 0:
+            return {"error": f"Could not fetch current price for {symbol}", "success": False}
+
+        take_profit_price = round(ask_price * (1 + take_profit_pct), 2)
+        stop_loss_price   = round(ask_price * (1 - stop_loss_pct), 2)
+
+        order_data = {
+            "symbol":        symbol.upper(),
+            "side":          "buy",
+            "type":          "market",
+            "time_in_force": "day",
+            "notional":      str(round(notional, 2)),
+            "order_class":   "bracket",
+            "take_profit":   {"limit_price": str(take_profit_price)},
+            "stop_loss":     {"stop_price":  str(stop_loss_price)},
+        }
+
+        r = await client.post(
+            f"{PAPER_API}/v2/orders",
+            headers=_headers(),
+            json=order_data,
+        )
+
+        if r.status_code in (200, 201):
+            o = r.json()
+            return {
+                "success":          True,
+                "emoji":            "🟢",
+                "message":          f"🟢 BRACKET BUY {symbol.upper()} — ${notional:.0f} notional",
+                "order": {
+                    "order_id":         o["id"],
+                    "symbol":           o["symbol"],
+                    "side":             o["side"],
+                    "notional":         o.get("notional"),
+                    "type":             o["type"],
+                    "order_class":      o.get("order_class"),
+                    "status":           o["status"],
+                    "submitted_at":     o.get("submitted_at"),
+                },
+                "entry_price":      ask_price,
+                "take_profit_price": take_profit_price,
+                "stop_loss_price":   stop_loss_price,
+                "take_profit_pct":  take_profit_pct,
+                "stop_loss_pct":    stop_loss_pct,
+                "reward_risk_ratio": round(take_profit_pct / stop_loss_pct, 2),
+                "timestamp":        datetime.now(timezone.utc).isoformat(),
+            }
+        else:
+            error = r.json() if r.headers.get("content-type", "").startswith("application/json") else {"message": r.text}
+            return {
+                "success": False,
+                "error":   error.get("message", r.text),
+                "symbol":  symbol.upper(),
+            }
 
 
 # ── Smart Trade (Prediction-Driven) ─────────────────────────────────
