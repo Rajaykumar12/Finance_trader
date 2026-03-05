@@ -19,6 +19,7 @@ from engines.trade_execution import (
     smart_trade,
 )
 from engines.auto_trader import auto_trader
+from engines.day_trader import day_trader
 
 logger = logging.getLogger(__name__)
 router = APIRouter()
@@ -149,19 +150,28 @@ async def auto_trade_start(
     check_interval: int = 60,
     max_investment: float = 5000,
     max_positions: int = 5,
+    min_score: float = 78.0,
+    min_confidence: float = 0.65,
+    take_profit_pct: float = 0.015,
+    stop_loss_pct: float = 0.008,
 ):
-    """Start the autonomous trading bot.
+    """Start the rigorous autonomous trading bot.
 
-    The bot will continuously check predictions and execute trades
-    for the specified duration.
+    Only enters trades when ALL conviction gates pass simultaneously.
+    Every trade has a bracket exit (TP + SL) wired in at submission time.
 
     Args:
-        duration_minutes: How long to run (default 30 min)
-        check_interval: Seconds between checks (default 60s, min 30s)
-        max_investment: Max $ per trade (default $5,000)
-        max_positions: Max simultaneous positions (default 5)
+        duration_minutes:  How long to run (default 30 min)
+        check_interval:    Seconds between checks (default 60s)
+        max_investment:    Hard cap per trade in $ (default $5,000)
+        max_positions:     Max simultaneous open positions (default 5)
+        min_score:         Minimum composite score to enter (default 78)
+        min_confidence:    Minimum prediction confidence, 0–1 (default 0.65)
+        take_profit_pct:   Take-profit above entry, e.g. 0.015 = 1.5% (default)
+        stop_loss_pct:     Stop-loss below entry, e.g. 0.008 = 0.8% (default)
 
-    Example: POST /api/v1/trade/auto/start?duration_minutes=30&check_interval=60
+    Example:
+        POST /api/v1/trade/auto/start?duration_minutes=30&min_score=78&take_profit_pct=0.015
     """
     try:
         return await auto_trader.start(
@@ -169,6 +179,10 @@ async def auto_trade_start(
             check_interval=check_interval,
             max_investment=max_investment,
             max_positions=max_positions,
+            min_score=min_score,
+            min_confidence=min_confidence,
+            take_profit_pct=take_profit_pct,
+            stop_loss_pct=stop_loss_pct,
         )
     except Exception as e:
         return {"error": str(e)}
@@ -190,6 +204,100 @@ async def auto_trade_status():
         return await auto_trader.status()
     except Exception as e:
         return {"error": str(e)}
+
+
+# ────────────────────────────────────────────────────────────────────
+# Day Trading Bot
+# ────────────────────────────────────────────────────────────────────
+
+@router.get("/trade/session", tags=["Day Trading"])
+async def market_session():
+    """Get the current US market session state (ET timezone).
+
+    Returns session label (PRE-MARKET, REGULAR, EOD-FLATTEN, AFTER-HOURS, CLOSED, WEEKEND),
+    whether the market is open, minutes to open/close, and today's date ET.
+    """
+    from engines.market_hours import session_summary
+    return session_summary()
+
+
+@router.post("/trade/day/start", tags=["Day Trading"])
+async def day_trade_start(
+    check_interval:       int   = 60,
+    max_investment:       float = 5000.0,
+    max_positions:        int   = 5,
+    take_profit_pct:      float = 0.015,
+    stop_loss_pct:        float = 0.008,
+    daily_drawdown_limit: float = 0.02,
+    min_intraday_score:   float = 70.0,
+):
+    """Start the autonomous day-trading bot.
+
+    The bot manages its own market hours — it waits during off-hours,
+    wakes at 9:30 ET, scans at 9:15 ET, and closes all positions at 15:45 ET.
+
+    Args:
+        check_interval:       Seconds between cycles (default 60s, min 30s)
+        max_investment:       Max $ per trade (default $5,000)
+        max_positions:        Max simultaneous open positions (default 5)
+        take_profit_pct:      TP above entry, e.g. 0.015 = +1.5%
+        stop_loss_pct:        SL below entry, e.g. 0.008 = -0.8%
+        daily_drawdown_limit: Stop buying if portfolio drops this % (default 2%)
+        min_intraday_score:   Minimum VWAP+EMA+ORB score to enter (default 70)
+
+    Example:
+        POST /api/v1/trade/day/start?take_profit_pct=0.02&stop_loss_pct=0.01
+    """
+    try:
+        return await day_trader.start(
+            check_interval=check_interval,
+            max_investment=max_investment,
+            max_positions=max_positions,
+            take_profit_pct=take_profit_pct,
+            stop_loss_pct=stop_loss_pct,
+            daily_drawdown_limit=daily_drawdown_limit,
+            min_intraday_score=min_intraday_score,
+        )
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@router.post("/trade/day/stop", tags=["Day Trading"])
+async def day_trade_stop():
+    """Stop the day-trading bot."""
+    try:
+        return await day_trader.stop()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@router.get("/trade/day/status", tags=["Day Trading"])
+async def day_trade_status():
+    """Get day-trader status: session, P&L, positions, PDT remaining, log."""
+    try:
+        return await day_trader.status()
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@router.get("/trade/day/signals/{symbol}", tags=["Day Trading"])
+async def intraday_signals(symbol: str):
+    """Get live intraday signals for a symbol (VWAP, EMA, ORB).
+
+    Fetches today's 5-min bars and computes the intraday signal immediately.
+    Useful for inspecting the signal engine without running the full bot.
+
+    Example: GET /api/v1/trade/day/signals/AAPL
+    """
+    try:
+        from ingestion.alpaca_bars import fetch_today_bars
+        from engines.intraday_signals import generate_intraday_signal
+        bars = await fetch_today_bars(symbol)
+        if not bars:
+            return {"error": f"No intraday bars for {symbol.upper()} — is market open?", "symbol": symbol.upper()}
+        return generate_intraday_signal(symbol.upper(), bars)
+    except Exception as e:
+        return {"error": str(e), "symbol": symbol.upper()}
 
 
 # ────────────────────────────────────────────────────────────────────
