@@ -11,15 +11,15 @@ A fully autonomous trading intelligence system that treats markets as **adaptive
 ```
                           ┌──────────────────────┐
                           │     FastAPI Server    │
-                          │    (23 endpoints)     │
+                          │    (32 endpoints)     │
                           └──────────┬───────────┘
                                      │
               ┌──────────────────────┼──────────────────────┐
               ▼                      ▼                      ▼
-    ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────┐
-    │ Prediction Engine│   │Scenario Simulator│  │  Trade Executor  │
-    │  (6 dimensions)  │   │ (Monte Carlo GBM)│  │ (Alpaca Paper)  │
-    └───────┬─────────┘   └─────────────────┘   └────────┬────────┘
+    ┌─────────────────┐   ┌─────────────────┐   ┌─────────────────────┐
+    │ Prediction Engine│   │Scenario Simulator│  │   Trading Bots       │
+    │  (6 dimensions)  │   │ (Monte Carlo GBM)│  │ Rigorous + Day Bot  │
+    └───────┬─────────┘   └─────────────────┘   └────────┬────────────┘
             │                                             │
             ▼                                             ▼
     ┌─────────────────────────────────────────────────────────────┐
@@ -74,7 +74,7 @@ EQUITY_SYMBOLS=AAPL,NVDA,TSLA,MSFT,GOOGL,AMZN,META
 CRYPTO_SYMBOLS=BTC
 ```
 
-> **Note:** The platform works without Alpaca/Finnhub keys — it falls back to Yahoo Finance for data and yfinance for news.
+> **Note:** The platform works without Alpaca/Finnhub keys — it falls back to Yahoo Finance for data.
 
 ### 3. Build the C++ Gamma Engine
 
@@ -101,6 +101,8 @@ API docs available at: **http://localhost:8000/docs**
 python -m pytest tests/ -v
 ```
 
+**56 tests** — all pass.
+
 ---
 
 ##  The 6 Intelligence Dimensions
@@ -126,7 +128,114 @@ Every stock is scored **0–100** on 6 dimensions, combined into a weighted comp
 
 ---
 
-##  API Endpoints (23 total)
+##  Trading Bots
+
+The platform includes **two autonomous trading bots** with different strategies.
+
+### 🤖 Rigorous Auto-Trader
+
+An AI-driven bot that uses the full 6-dimension prediction engine. Designed for **high conviction, low frequency** — it skips most signals and only acts when all gates agree.
+
+**Entry Gates** (ALL must pass to enter):
+
+| Gate | Threshold |
+|------|-----------|
+| Composite AI score | ≥ 78 (was 60) |
+| Prediction confidence | ≥ 65% |
+| Macro regime | Score ≥ 55 (not a risk-off day) |
+| Liquidity | Not `"vanishing"` |
+| Bullish signals | ≥ 2 independent reasons |
+| PDT day-trades remaining | ≥ 2 |
+| Symbol cooldown | 10 min post-close |
+| Signal type | Must be `BUY` |
+| Macro circuit breaker | Score < 35 → block all buys |
+
+**Position Sizing** — Half-Kelly:
+```
+edge     = (composite_score − 50) / 50
+notional = edge × confidence × buying_power   (capped at max_investment)
+```
+
+**Exit** — Bracket order locked in at entry (default: TP +1.5%, SL -0.8%, R:R ≈ 1.9:1)
+
+```bash
+# Start (default: 30 min, strict gates)
+curl -X POST "http://localhost:8000/api/v1/trade/auto/start?\
+duration_minutes=30&min_score=78&min_confidence=0.65&take_profit_pct=0.015&stop_loss_pct=0.008"
+
+# Monitor
+curl http://localhost:8000/api/v1/trade/auto/status | python -m json.tool
+
+# Stop
+curl -X POST http://localhost:8000/api/v1/trade/auto/stop
+```
+
+---
+
+### 📈 Day Trading Bot
+
+An intraday bot that reacts to **technical price signals** on 5-minute bars. Market-hours aware — manages its own session lifecycle automatically.
+
+**Intraday Signals** (score 0–100, BUY if ≥ 70):
+
+| Signal | Description | Score Impact |
+|--------|-------------|-------------|
+| **VWAP** | Price above/below Volume-Weighted Avg Price | ±12 |
+| **EMA Crossover** | 9-period EMA vs 21-period EMA | ±15 |
+| **ORB Breakout** | Break above/below 30-min opening range | ±15 |
+| **Momentum** | 3 consecutive rising/falling closes | ±8 |
+
+**Session Lifecycle** (automatic, IST times shown):
+
+| ET Time | IST Time | Action |
+|---------|----------|--------|
+| 9:10–9:25 AM | 7:40–7:55 PM | Pre-market watchlist scan (ranks symbols by AI score) |
+| 9:30 AM | 8:00 PM | Market open — intraday loop starts |
+| 3:45 PM | 2:15 AM | EOD flatten — all positions closed |
+| 4:00 PM | 2:30 AM | Market close — bot waits for next session |
+
+**Safety Controls:**
+
+| Control | Default | Description |
+|---------|---------|-------------|
+| Daily drawdown limit | −2% | Stop all new buys if portfolio drops this much from day open |
+| PDT rolling tracker | 3 per 5 days | Enforces Pattern Day Trader rule, stored in Redis |
+| EOD flatten | 15:45 ET | All positions closed before market close |
+| Max positions | 5 | Maximum simultaneous open positions |
+
+```bash
+# Start day trading bot
+curl -X POST "http://localhost:8000/api/v1/trade/day/start?\
+take_profit_pct=0.015&stop_loss_pct=0.008&daily_drawdown_limit=0.02"
+
+# Check live intraday signals for a symbol
+curl http://localhost:8000/api/v1/trade/day/signals/AAPL
+
+# Current market session (ET timezone)
+curl http://localhost:8000/api/v1/trade/session
+
+# Status (P&L, positions, PDT remaining, log)
+curl http://localhost:8000/api/v1/trade/day/status
+
+# Stop
+curl -X POST http://localhost:8000/api/v1/trade/day/stop
+```
+
+---
+
+### Bracket Orders
+
+Both bots use **bracket orders** — the take-profit and stop-loss are submitted atomically at entry. Alpaca manages them automatically; no polling loop needed.
+
+```
+Entry (market buy)
+  ├── Take-profit limit sell at entry × (1 + tp%)   → filled when target reached
+  └── Stop-loss stop sell at entry × (1 − sl%)      → filled when loss limit hit
+```
+
+---
+
+##  API Endpoints (32 total)
 
 ### Core Data
 ```bash
@@ -170,34 +279,20 @@ POST   /api/v1/trade/smart/{symbol}                   # AI-driven trade
 DELETE /api/v1/trade/position/{symbol}                # Close position
 ```
 
-### Auto-Trader Bot
+### Rigorous Auto-Trader
 ```bash
-POST /api/v1/trade/auto/start?duration_minutes=30    # Start autonomous trading
-POST /api/v1/trade/auto/stop                          # Emergency stop
-GET  /api/v1/trade/auto/status                        # Live status + trade log
+POST /api/v1/trade/auto/start   # Start (params: min_score, min_confidence, take_profit_pct, stop_loss_pct)
+POST /api/v1/trade/auto/stop    # Emergency stop
+GET  /api/v1/trade/auto/status  # Live status + full decision log
 ```
 
----
-
-##  Auto-Trader Bot
-
-The platform includes an autonomous trading bot that:
-
-1. **Runs for a configurable duration** (5 min to 24 hr)
-2. **Checks predictions** every 30–120 seconds for all tracked symbols
-3. **Executes trades** automatically when signals are strong
-4. **Tracks P&L** and logs every decision with reasoning
-
+### Day Trading Bot
 ```bash
-# Start: 30 min, check every 60s, max $5K/trade, max 5 positions
-curl -X POST "http://localhost:8000/api/v1/trade/auto/start?\
-duration_minutes=30&check_interval=60&max_investment=5000&max_positions=5"
-
-# Monitor
-curl http://localhost:8000/api/v1/trade/auto/status | python -m json.tool
-
-# Stop
-curl -X POST http://localhost:8000/api/v1/trade/auto/stop
+GET  /api/v1/trade/session                     # Current market session (ET)
+POST /api/v1/trade/day/start                   # Start day bot (params: daily_drawdown_limit, min_intraday_score)
+POST /api/v1/trade/day/stop                    # Stop
+GET  /api/v1/trade/day/status                  # Status + PDT remaining + P&L
+GET  /api/v1/trade/day/signals/{symbol}        # Live VWAP + EMA + ORB signal
 ```
 
 ---
@@ -225,12 +320,12 @@ curl "http://localhost:8000/api/v1/simulate/AAPL?horizon=1m" | python -m json.to
 | **Python 3.11+ / FastAPI** | API server + async engines |
 | **C++ / pybind11** | High-performance gamma exposure computation |
 | **FinBERT (HuggingFace)** | Financial sentiment analysis AI |
-| **Redis** | Real-time pub/sub data bus |
-| **Alpaca API** | Paper trading + US equity data |
-| **Binance WebSocket** | Live BTC order book |
+| **Redis** | Real-time pub/sub data bus + PDT state |
+| **Alpaca API** | Paper trading + US equity data + OHLCV bars |
+| **Binance WebSocket** | Live BTC order book (100ms) |
 | **Yahoo Finance** | Fundamentals, options chains, macro |
 | **Finnhub** | Real-time financial news |
-| **NumPy** | Monte Carlo simulations |
+| **NumPy / Polars** | Monte Carlo simulations + tick analytics |
 
 ---
 
@@ -243,6 +338,7 @@ Trading/
 │   └── settings.py                  # Environment configuration
 ├── ingestion/                       # Data pipelines
 │   ├── alpaca_client.py             # US stock quotes (every 2s)
+│   ├── alpaca_bars.py               # 5-min OHLCV bar fetcher       ← NEW
 │   ├── binance_ws.py                # BTC order book (WebSocket)
 │   ├── yahoo_finance.py             # Fundamentals + options chains
 │   ├── finnhub_poller.py            # News headlines
@@ -254,23 +350,25 @@ Trading/
 │   ├── cpp/gamma_engine.cpp         # C++ gamma exposure engine
 │   ├── prediction.py                # 6-dimension scoring → BUY/HOLD/SELL
 │   ├── scenario_simulation.py       # Monte Carlo + stress tests
-│   ├── trade_execution.py           # Alpaca paper trading
-│   ├── auto_trader.py               # Autonomous trading bot
+│   ├── trade_execution.py           # Alpaca paper trading + bracket orders ← UPDATED
+│   ├── auto_trader.py               # Rigorous AI bot (9-gate filter)       ← UPDATED
+│   ├── market_hours.py              # US ET session utilities                ← NEW
+│   ├── intraday_signals.py          # VWAP + EMA + ORB signals               ← NEW
+│   ├── day_trader.py                # Day trading bot (IST/ET aware)         ← NEW
 │   └── lookup.py                    # On-demand symbol lookup
 ├── api/
 │   ├── app.py                       # FastAPI app factory
-│   └── routes.py                    # 23 API endpoints
+│   └── routes.py                    # 32 API endpoints                       ← UPDATED
 ├── state/
 │   └── redis_client.py              # Redis pub/sub client
 ├── models/
 │   └── schemas.py                   # Pydantic data models
-├── tests/                           # 55 unit tests
-│   ├── test_api.py
+├── tests/                           # 56 unit tests
 │   ├── test_engines.py
 │   ├── test_gamma_engine.py
-│   ├── test_ingestion.py
-│   ├── test_new_features.py
-│   └── test_redis_roundtrip.py
+│   ├── test_rigorous_auto_trader.py # ← NEW
+│   ├── test_day_trader.py           # ← NEW
+│   └── ...
 ├── .env                             # API keys (not committed)
 ├── .env.example                     # Template for .env
 ├── pyproject.toml                   # Dependencies
